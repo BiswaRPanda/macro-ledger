@@ -577,19 +577,32 @@ async function geminiModels(signal){
   };
   const names=(j.models||[]).filter(m=>(m.supportedGenerationMethods||[]).includes('generateContent'))
     .map(m=>String(m.name||'').replace(/^models\//,'')).filter(n=>rank(n)!==null).sort((x,y)=>rank(y)-rank(x));
-  gModels=names.length?names:['gemini-flash-latest'];gFor=apiKey;
+  // Full Flash models are often overloaded on the free tier, so Lite ones come early in the queue, not last.
+  const full=names.filter(n=>rank(n)>=1000),lite=names.filter(n=>rank(n)<1000);
+  const order=[full[0],full[1],lite[0],lite[1],full[2]].filter(Boolean);
+  gModels=order.length?order:['gemini-flash-latest','gemini-flash-lite-latest'];gFor=apiKey;
   return gModels;
 }
 async function gemini(data,signal){
-  const models=(await geminiModels(signal)).slice(0,4);
+  const models=await geminiModels(signal);
   let last='upstream_error';
   for(const m of models){
-    const res=await call(G+'models/'+m+':generateContent',{method:'POST',signal,
+    // Give each model 30 seconds, then move on to the next one.
+    const t=new AbortController(),stop=()=>t.abort();
+    if(signal){if(signal.aborted)throw{code:'cancelled'};signal.addEventListener('abort',stop)}
+    const timer=setTimeout(stop,30000);
+    let res;
+    try{res=await call(G+'models/'+m+':generateContent',{method:'POST',signal:t.signal,
       headers:{'content-type':'application/json','x-goog-api-key':apiKey},
       body:JSON.stringify({contents:[{parts:[{inline_data:{mime_type:'image/jpeg',data}},{text:PROMPT}]}],
-        generationConfig:{responseMimeType:'application/json'}})});
+        generationConfig:{responseMimeType:'application/json'}})})}
+    catch(e){
+      if(signal&&signal.aborted)throw{code:'cancelled'};
+      last=e&&e.code==='cancelled'?'busy':'upstream_error';continue;
+    }
+    finally{clearTimeout(timer);if(signal)signal.removeEventListener('abort',stop)}
     if(res.status===401||res.status===403)throw{code:'bad_key'};
-    if(!res.ok){last=res.status===429?'rate_limited':'upstream_error';continue}   // no free quota or gone: try the next model
+    if(!res.ok){last=res.status===429?'rate_limited':res.status===503?'busy':'upstream_error';continue}   // no free quota or gone: try the next model
     const j=await res.json();
     const c=j.candidates&&j.candidates[0];
     const text=((c&&c.content&&c.content.parts)||[]).map(x=>x.text||'').join('');
@@ -628,6 +641,7 @@ const ERR={rate_limited:'The service is busy or you have hit today’s usage lim
   refused:'Claude could not work with that photo. Try a different one.',
   invalid_json:'The estimate came back garbled. Try again.',
   empty_completion:'No estimate came back. Try again with a clearer photo.',
+  busy:'Google’s free models are overloaded right now. Try again in a minute.',
   bad_key:'That API key was not accepted. Check it in Plan and try again.'};
 const HIDE=['not_granted','sampling_disabled','not_declared','capability_disabled','capability_removed','images_unavailable'];
 async function connectPhoto(){
@@ -643,7 +657,7 @@ async function connectPhoto(){
 const head=t=>`<div class="top"><h1>${t}</h1><button class="icon" type="button" data-act="close" aria-label="Close">×</button></div>`;
 function sheetWait(){
   sheet.innerHTML=`${head('Reading your photo')}
-    <div class="card"><div class="muted">Working out what is on the plate and how much. This usually takes 10 to 40 seconds.</div></div>
+    <div class="card"><div class="muted">Working out what is on the plate and how much. This usually takes 10 to 40 seconds, longer when the service is busy.</div></div>
     <button class="btn ghost full" type="button" data-act="close">Stop</button>`;
 }
 function sheetPhotoError(msg){
