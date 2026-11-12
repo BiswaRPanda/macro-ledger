@@ -106,6 +106,8 @@ input[type=text],input[type=number],input[type=search],input[type=date],select{w
 a{color:var(--accent)}
 textarea{width:100%;min-height:76px;padding:10px 12px;border:0;background:var(--field);border-radius:14px;font:inherit;font-size:16px;color:inherit;resize:none;display:block}
 .shot{width:100%;max-height:170px;object-fit:cover;border-radius:16px;display:block}
+.tag{display:inline-block;font-size:11px;font-weight:600;padding:1px 7px;border-radius:99px;border:1px solid var(--line);color:var(--muted);margin-right:6px}
+.tag.ok{color:var(--accent);border-color:var(--accent)}
 .pill.ok{color:var(--accent);border-color:var(--accent)}
 .pill.bad{color:var(--warn);border-color:var(--warn)}
 .check{display:flex;align-items:center;gap:8px;font-size:14px}
@@ -427,6 +429,8 @@ function renderPlan(){
     <div class="secthead"><h2>Photo logging</h2>${apiKey?'<span class="pill ok">Key saved</span>':'<span class="pill">No key yet</span>'}</div>
     <div class="small muted">${apiKey?(isClaudeKey()?'Using your Anthropic key (paid).':'Using your Google Gemini key (free tier).')+' It is stored on this phone only.':'Needs an API key. A Google Gemini key is free and takes a minute to create.'}</div>
     <button class="btn ghost full" type="button" data-act="${apiKey?'dropKey':'setKey'}">${apiKey?'Remove key from this phone':'Add API key'}</button>
+    <div class="small muted">${fdcKey?'Estimates are checked against the USDA food database with your key.':'Estimates are checked against the USDA food database on a shared demo key with a low hourly limit. Your own free key removes the limit.'}</div>
+    <button class="btn ghost full" type="button" data-act="${fdcKey?'dropFdc':'setFdc'}">${fdcKey?'Remove food database key':'Add food database key'}</button>
   </section>`:''}
   ${standalone?`<section class="card">
     <h2>Backup</h2>
@@ -555,7 +559,7 @@ async function claude(data,signal,prompt=PROMPT){
   const res=await call('https://api.anthropic.com/v1/messages',{method:'POST',signal,
     headers:{'content-type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
     body:JSON.stringify({model:'claude-sonnet-5-5',max_tokens:1500,messages:[{role:'user',content:[
-      {type:'image',source:{type:'base64',media_type:'image/jpeg',data}},{type:'text',text:prompt}]}]})});
+      ...(data?[{type:'image',source:{type:'base64',media_type:'image/jpeg',data}}]:[]),{type:'text',text:prompt}]}]})});
   if(res.status===401||res.status===403)throw{code:'bad_key'};
   if(res.status===429)throw{code:'rate_limited'};
   if(!res.ok)throw{code:'upstream_error'};
@@ -601,7 +605,7 @@ async function gemini(data,signal,prompt=PROMPT){
     let res;
     try{res=await call(G+'models/'+m+':generateContent',{method:'POST',signal:t.signal,
       headers:{'content-type':'application/json','x-goog-api-key':apiKey},
-      body:JSON.stringify({contents:[{parts:[{inline_data:{mime_type:'image/jpeg',data}},{text:prompt}]}],
+      body:JSON.stringify({contents:[{parts:[...(data?[{inline_data:{mime_type:'image/jpeg',data}}]:[]),{text:prompt}]}],
         generationConfig:{responseMimeType:'application/json'}})})}
     catch(e){
       if(signal&&signal.aborted)throw{code:'cancelled'};
@@ -620,10 +624,10 @@ async function gemini(data,signal,prompt=PROMPT){
   throw{code:last};
 }
 async function direct(file,signal,prompt){
-  let data;try{data=await toJpeg(file)}catch(e){throw{code:'image_rejected'}}
+  let data=null;if(file){try{data=await toJpeg(file)}catch(e){throw{code:'image_rejected'}}}
   return isClaudeKey()?claude(data,signal,prompt):gemini(data,signal,prompt);
 }
-const estimate=(file,signal,prompt)=>sampler?sampler.json(prompt,{images:[file],signal}):direct(file,signal,prompt);
+const estimate=(file,signal,prompt)=>sampler?sampler.json(prompt,file?{images:[file],signal}:{signal}):direct(file,signal,prompt);
 function sheetKey(){
   sheet.innerHTML=`${head('Set up photo logging')}
     <div class="small muted">Photo logging sends your picture to an AI model using your own API key. The key is stored on this phone only.</div>
@@ -639,7 +643,8 @@ const photoInput=document.getElementById('photo');
 const PROMPT=`The attached image is a photo of a meal, snack or drink that someone wants to log in a calorie tracker. Dishes may be Indian home or restaurant food.
 Identify each distinct food or drink you can see and estimate the portion actually shown, using plate, bowl and cutlery size as a guide. Include cooking oil, ghee or sauces inside the dish they belong to.
 Reply with only a JSON array, one object per food, in this shape:
-[{"name":"Dal tadka","serving":"1 katori, about 150 g","kcal":150,"protein":8,"carbs":18,"fat":5}]
+[{"name":"Dal tadka","serving":"1 katori, about 150 g","grams":150,"kcal":150,"protein":8,"carbs":18,"fat":5,"lookup":"lentils, cooked","chain":null}]
+"grams" is your estimate of the weight of the portion shown. "lookup" is a plain generic English name for the food, worded the way a nutrition database lists it. "chain" is the name of the restaurant or fast food chain when the item comes from one (packaging, branding, or the person says so), for example "McDonald's" or "KFC", otherwise null.
 Numbers are totals for the portion shown: kcal, then grams of protein, carbs and fat. Keep names short. If the image shows a packaged product with a readable nutrition label, use the label values.
 If there is no food or drink in the image, reply with [].`;
 const ERR={rate_limited:'The service is busy or you have hit today’s usage limit. Try again in a little while.',
@@ -686,9 +691,9 @@ function sheetPhotoError(msg){
 function sheetReview(){
   const it=sh.items,t=it.reduce((a,i)=>({k:a.k+i.k,p:a.p+i.p,c:a.c+i.c,f:a.f+i.f}),{k:0,p:0,c:0,f:0});
   sheet.innerHTML=`${head('Check the estimate')}
-    <div class="small muted">Estimated from your photo. Remove anything that is wrong before you log it.</div>
+    <div class="small muted">Estimated from your photo, then checked against a food database and restaurant menus where they apply. Remove anything that is wrong before you log it.</div>
     <div class="rows list">${it.map((i,x)=>`<div class="row"><div class="grow"><div class="name">${esc(i.n)}</div>
-      <div class="sub num">${esc(i.u)} · ${pcf(i)}</div></div><div class="kc num">${r0(i.k)}</div>
+      <div class="sub num">${esc(i.u)} · ${pcf(i)}</div>${badge(i)}</div><div class="kc num">${r0(i.k)}</div>
       <button class="x" type="button" data-act="dropItem" data-i="${x}" aria-label="Remove ${esc(i.n)}">×</button></div>`).join('')}</div>
     <div class="card"><div class="kv"><span class="muted small">Total</span><span class="v num">${r0(t.k)} kcal</span></div>
       <div class="kv"><span class="muted small">Protein · Carbs · Fat</span><span class="v num">${r0(t.p)} · ${r0(t.c)} · ${r0(t.f)} g</span></div></div>
@@ -706,6 +711,200 @@ function clean(o){
   if(!k)return null;
   return{n,u:String(o.serving||'as pictured').trim().slice(0,40),k:r1(k),p:r1(p),c:r1(c),f:r1(f)};
 }
+/* ---------- verification: database tally, restaurant menus, final check ---------- */
+/* Menu figures per serving: [name, serving, kcal, protein, carbs, fat]. null means the source page did not give that value.
+   Source: FatSecret brand listings read in November 2026 (Wendy's US menu with macros; India listings for the others,
+   which give calories only). They are third-party listings, not the chains' own tables. */
+const CHAINS={
+mcdonalds:{name:"McDonald's",items:[
+["Aloo Tikki Burger","146 g",339,null,null,null],["McVeggie Burger","168 g",387,null,null,null],["McChicken Burger","173 g",396,null,null,null],
+["McSpicy Chicken Burger","186 g",449,null,null,null],["McCrispy Chicken Burger","227 g",507,null,null,null],["Butter Paneer Grilled Burger","142 g",382,null,null,null],
+["Chicken Surprise Burger","128 g",293,null,null,null],["Veg Surprise Burger","132 g",313,null,null,null],["McSpicy Chicken Wrap","257 g",567,null,null,null],
+["McSpicy Paneer Wrap","250 g",674,null,null,null],["Chicken McNuggets, 4 pieces","64 g",168,null,null,null],["Pizza McPuff","87 g",225,null,null,null],
+["Fries, regular","77 g",215,null,null,null],["Fries, medium","109 g",304,null,null,null],["Fries, large","154 g",431,null,null,null],
+["McFlavor Fries, regular","110 g",289,null,null,null],["Cold Coffee","300 ml",301,null,null,null],["Hot Coffee, black","200 ml",6,null,null,null],
+["Masala Chai, regular","150 ml",94,null,null,null]]},
+wendys:{name:"Wendy's",items:[
+["Dave's Single","1",570,29,36,34],["Dave's Double","1",810,49,36,53],["Baconator","1",900,57,34,59],["Son of Baconator","1",590,33,34,37],
+["Double Stack","1",380,23,25,21],["Jr. Hamburger","1",230,12,24,10],["Jr. Cheeseburger","1",270,14,25,13],["Jr. Cheeseburger Deluxe","1",330,15,26,19],
+["Jr. Bacon Cheeseburger","1",350,18,24,21],["Big Bacon Classic","1",610,34,36,38],["Cheesy Bacon Cheeseburger, Single","1",560,34,32,33],
+["Cheesy Bacon Cheeseburger, Double","1",810,54,32,52],["Cheesy Bacon Cheeseburger, Triple","1",1090,76,33,74],["Classic Chicken Sandwich","1",480,29,44,21],
+["Spicy Chicken Sandwich","1",470,28,45,20],["Crispy Chicken Sandwich","1",340,15,32,17],["Chicken Nuggets, 4 pieces","1",170,9,9,11],
+["Chicken Nuggets, 6 pieces","1",260,14,13,16],["Chicken Nuggets, 10 pieces","1",430,23,22,27],["Spicy Chicken Nuggets, 4 pieces","1",190,10,9,12],
+["Spicy Chicken Nuggets, 6 pieces","1",280,15,13,18],["Spicy Chicken Nuggets, 10 pieces","1",470,26,22,31],["Natural-Cut Fries, Jr.","1",210,3,28,9],
+["Natural-Cut Fries, small","1",260,4,35,12],["Natural-Cut Fries, medium","1",350,5,47,16],["Natural-Cut Fries, large","1",470,7,63,21],
+["Chili Cheese Fries","1",510,18,49,27],["Baconator Fries","1",450,14,42,25],["Chili, large","1",370,25,29,17],["Plain Baked Potato","1",270,7,61,0],
+["Sour Cream and Chive Baked Potato","1",300,8,63,3],["Cheese Baked Potato","1",440,15,65,14],["Bacon Cheese Baked Potato","1",420,17,64,12],
+["Chili and Cheese Baked Potato","1",490,21,70,14],["Apple Pecan Chicken Salad","1 salad",440,33,30,22],["Classic Chocolate Frosty, Jr.","1",190,6,31,6],
+["Classic Chocolate Frosty, medium","1",390,12,61,12],["Classic Chocolate Frosty, large","1",510,15,80,15],["Vanilla Frosty, medium","1",390,12,62,11]]},
+california_burrito:{name:"California Burrito",items:[
+["Mexican Paneer Rice Bowl","1",792,null,null,null],["BBQ Paneer Rice Bowl","1",792,null,null,null],["Chili Chipotle Chicken Rice Bowl","1",725,null,null,null],
+["BBQ Chicken Rice Bowl, mini","1",570,null,null,null],["Crispy Peri Peri Chicken Rice Bowl, mini","300 g",600,null,null,null],["Crispy Mushroom Rice Bowl, mini","1",600,null,null,null],
+["Pro Bowl, Grilled Barbeque Chicken","300 g",488,null,null,null],["Pro Bowl, Mexican Paneer","1",555,null,null,null],["BBQ Chicken Salad","1",459,null,null,null],
+["Crispy Peri Peri Chicken Salad","1",489,null,null,null],["Mexican Paneer Salad","1",533,null,null,null],["Crispy Mushroom Salad Bowl","1",482,null,null,null],
+["Chocodilla","1",220,null,null,null]]},
+kfc:{name:"KFC",items:[
+["Hot and Crispy Chicken, 1 piece","110 g",320,null,null,null],["Hot and Crispy Chicken, 2 pieces","220 g",640,null,null,null],["Hot and Crispy Chicken leg, 1 piece","100 g",288,null,null,null],
+["Boneless Strips, 3 pieces","135 g",351,null,null,null],["Hot Wings, 1 piece","35 g",125,null,null,null],["Hot Wings, 2 pieces","70 g",249,null,null,null],
+["Classic Zinger Burger","225 g",612,null,null,null],["Classic Chicken Krisper Burger","150 g",405,null,null,null],["Classic Chicken Roll","150 g",461,null,null,null],
+["Double Chicken Roll","190 g",526,null,null,null],["Popcorn Chicken, regular","90 g",306,null,null,null],["Popcorn Chicken, medium","140 g",476,null,null,null],
+["Popcorn Chicken Rice Bowl","340 g",615,null,null,null],["Fries, regular","75 g",224,null,null,null],["Fries, medium","100 g",299,null,null,null],
+["Choco Lava Cake","60 g",343,null,null,null]]},
+dominos:{name:"Domino's",items:[
+["Peppy Paneer Pizza","1 slice, 68 g",168,null,null,null],["Margherita Pizza, regular","1 slice, 52 g",138,null,null,null],["Farmhouse Pizza, medium","1 slice, 83 g",184,null,null,null],
+["Thin Crust Chicken Pizza","1 slice",225,null,null,null],["Garlic Bread","122 g",340,null,null,null],["Stuffed Garlic Bread","1 whole, 190 g",540,null,null,null],
+["Paneer Tikka Stuffed Garlic Bread","200 g",429,null,null,null],["Taco Mexicana Veg","91 g",327,null,null,null],["Taco Mexicana Chicken","97 g",322,null,null,null],
+["Zingy Parcel Veg","180 g",620,null,null,null],["Choco Lava Cake","1",350,null,null,null]]},
+burger_king:{name:"Burger King",items:[
+["Crispy Veg Burger","131 g",305,null,null,null],["Crispy Chicken Burger","125 g",299,null,null,null],["BK Veggie Burger","150 g",288,null,null,null],
+["Makhani Burst Veg Burger","131 g",389,null,null,null],["Paneer Royale Burger","253 g",599,null,null,null],["Crunchy Veg Whopper","303 g",366,null,null,null],
+["Flame Grilled Chicken Whopper Deluxe","179 g",326,null,null,null],["Paneer Royale Wrap Taco","229 g",406,null,null,null],["Veg Crunchy Taco","111 g",331,null,null,null],
+["Chicken Crunchy Taco","136 g",370,null,null,null],["Chicken Wings Fried, 2 pieces","63 g",148,null,null,null],["Pizza Puff Veg","72 g",208,null,null,null],
+["Fries, regular","72 g",204,null,null,null],["Fries, medium","114 g",333,null,null,null],["Peri Peri Fries, regular","79 g",220,null,null,null],
+["Thick Shake, Mango","295 ml",245,null,null,null],["Masala Chai","205 ml",84,null,null,null]]},
+subway:{name:"Subway",items:[
+["Veggie Delite Sandwich, 6 inch","164 g",242,null,null,null],["Paneer Tikka Sandwich, 6 inch","224 g",410,null,null,null],["Tandoori Chicken Tikka Sandwich, 6 inch","224 g",341,null,null,null],
+["Roasted Chicken Strips Sandwich, 6 inch","280 g",444,null,null,null],["Aloo Patty Sandwich","269 g",451,null,null,null],["Corn and Peas Sandwich","248 g",392,null,null,null],
+["Chicken Teriyaki Sandwich","274 g",407,null,null,null],["Italian BMT (Chicken) Sandwich","295 g",485,null,null,null],["Paneer Tikka Wrap","349 g",719,null,null,null],
+["Paneer Tikka Salad","411 g",397,null,null,null],["Tandoori Chicken Salad","411 g",379,null,null,null],["Paneer Tikka Rice Bowl","404 g",621,null,null,null],
+["Classic Cold Coffee","230 g",230,null,null,null],["Dark Chunk Cookie, eggless","45 g",204,null,null,null]]}
+};
+/* Any restaurant can be named; these are the ones with a saved menu. Other restaurants fall back to the database and the model. */
+const ALIAS={mcdonalds:['mcdonald','mcd'],wendys:['wendy'],california_burrito:['californiaburrito'],kfc:['kfc','kentuckyfried'],
+  dominos:['domino'],burger_king:['burgerking'],subway:['subway']};
+function chainKey(name){
+  const n=String(name||'').toLowerCase().replace(/[^a-z]/g,'');if(!n)return null;
+  for(const k in ALIAS)if(ALIAS[k].some(a=>a==='mcd'?n==='mcd':n.includes(a)))return k;
+  return null;
+}
+const q=v=>v===null?'?':v;
+const menuText=c=>CHAINS[c].items.map(a=>`${a[0]} | ${a[1]} | ${a[2]} kcal | P ${q(a[3])} | C ${q(a[4])} | F ${q(a[5])}`).join('\n');
+
+/* USDA FoodData Central. Per-100 g figures are remembered on the phone so the same food is only looked up once.
+   Without the owner's own free key it uses the shared demo key, which allows only a few lookups an hour. */
+const FDC_LS='macroledger.fdc',FDCKEY_LS='macroledger.fdckey';
+let fdcCache={},fdcKey='';
+try{fdcCache=JSON.parse(localStorage.getItem(FDC_LS)||'{}')||{};fdcKey=localStorage.getItem(FDCKEY_LS)||''}catch(e){}
+/* Returns {d,k,p,c,f} per 100 g, null when the database has no match, undefined when it could not be reached. */
+async function fdc(term,signal){
+  const t=String(term||'').trim().toLowerCase().slice(0,60);if(!t)return null;
+  if(t in fdcCache)return fdcCache[t];
+  const url='https://api.nal.usda.gov/fdc/v1/foods/search?query='+encodeURIComponent(t)
+    +'&dataType='+encodeURIComponent('Foundation,SR Legacy,Survey (FNDDS)')+'&pageSize=5&api_key='+encodeURIComponent(fdcKey||'DEMO_KEY');
+  try{
+    const res=await Promise.race([fetch(url,{signal}),new Promise(r=>setTimeout(()=>r(null),7000))]);
+    if(!res||!res.ok)return undefined;
+    const j=await res.json();let hit=null;
+    for(const f of j.foods||[]){
+      const n={};for(const x of f.foodNutrients||[])n[x.nutrientId]=x.value;
+      const k=n[1008]||n[2047]||n[2048];
+      if(k>0){hit={d:String(f.description||'').slice(0,80),k:r1(k),p:r1(n[1003]||0),c:r1(n[1005]||0),f:r1(n[1004]||0)};break}
+    }
+    fdcCache[t]=hit;
+    const keys=Object.keys(fdcCache);if(keys.length>300)delete fdcCache[keys[0]];
+    try{localStorage.setItem(FDC_LS,JSON.stringify(fdcCache))}catch(e){}
+    return hit;
+  }catch(e){return undefined}
+}
+/* Up to two entries from the built-in list and the owner's foods that share words with the name. */
+const words=s=>String(s).toLowerCase().replace(/[^a-z ]/g,' ').split(' ').filter(w=>w.length>2);
+function localRefs(name){
+  const a=new Set(words(name));if(!a.size)return[];
+  return[...S.meta.custom,...FOODS].map(f=>({f,sc:words(f.n).filter(w=>a.has(w)).length}))
+    .filter(x=>x.sc>0).sort((x,y)=>y.sc-x.sc).slice(0,2).map(x=>x.f);
+}
+function toItems(out){
+  const arr=Array.isArray(out)?out:(out&&Array.isArray(out.items)?out.items:[]);
+  return arr.map(o=>{
+    const i=clean(o);if(!i)return null;
+    const g=Number(o.grams);i.g=isFinite(g)&&g>0?r0(g):0;
+    i.lk=String(o.lookup||'').slice(0,60);
+    const ch=o.chain==null?'':String(o.chain).trim();
+    i.ch=/^(null|none|n\/a|)$/i.test(ch)?'':ch.slice(0,40);i.ck=chainKey(i.ch);
+    const b=String(o.basis||'');i.v=['menu','database','recalled','estimate'].includes(b)?b:'';
+    i.vn=String(o.note||'').slice(0,90);
+    return i;
+  }).filter(Boolean).slice(0,15);
+}
+/* Steps 2 to 4: gather evidence for each item, then ask the model to reconcile it. Never throws: if checking fails,
+   the first estimate goes through marked as unchecked. */
+async function verify(items,mine,fix){
+  // If the final check cannot run, saved menus are still applied by matching names in code.
+  const unchecked=()=>items.map(i=>{
+    Object.assign(i,{v:'estimate',vn:''});
+    if(!i.ck||/^\s*([2-9]|\d\d)/.test(i.u))return i;
+    const a=new Set(words(i.n));
+    const sc=CHAINS[i.ck].items.map(r=>({r,n:words(r[0]).filter(w=>a.has(w)).length,of:words(r[0]).length})).sort((x,y)=>y.n-x.n||x.of-y.of);
+    const best=sc[0];
+    if(!best||best.n<Math.min(2,best.of)||(sc[1]&&sc[1].n===best.n&&sc[1].of===best.of))return i;
+    const r=best.r,m=i.k>0?r[2]/i.k:1;
+    return Object.assign(i,{k:r[2],p:r[3]===null?r1(i.p*m):r[3],c:r[4]===null?r1(i.c*m):r[4],f:r[5]===null?r1(i.f*m):r[5],
+      v:'menu',vn:'Matched to "'+r[0]+'" on the saved menu.'});
+  });
+  try{
+    sheetStep('Checking the numbers','Comparing the estimate with the food database and restaurant menus.');
+    const ev=await Promise.all(items.map(async i=>{
+      if(i.ck)return{chain:i.ck};
+      const term=i.ch?(i.n.toLowerCase().includes(i.ch.toLowerCase())?i.n:i.ch+' '+i.n):i.lk;
+      const db=i.g&&term?await fdc(term,mine.signal):null;
+      return{db:db||null,local:localRefs(i.n)};
+    }));
+    if(ctl!==mine)return items;
+    const chains=[...new Set(items.map(i=>i.ck).filter(Boolean))];
+    if(!chains.length&&!items.some(i=>i.ch)&&!ev.some(e=>e.db||(e.local&&e.local.length)))return unchecked();
+    const lines=items.map((i,x)=>{
+      const e=ev[x];let t=`Item ${x+1}: ${i.n}, ${i.u}${i.g?', about '+i.g+' g':''}. First estimate: ${i.k} kcal, P ${i.p}, C ${i.c}, F ${i.f}.`;
+      if(e.chain)t+=`\n  Restaurant item from ${CHAINS[e.chain].name}. Use the ${CHAINS[e.chain].name} menu table below.`;
+      else if(i.ch)t+=`\n  Restaurant item from ${i.ch}. There is no saved menu for this restaurant.`;
+      if(e.db){const m=i.g/100;const dk=r0(e.db.k*m);
+        t+=`\n  Database (USDA "${e.db.d}"): per 100 g ${e.db.k} kcal, P ${e.db.p}, C ${e.db.c}, F ${e.db.f}. For ${i.g} g that is ${dk} kcal, P ${r1(e.db.p*m)}, C ${r1(e.db.c*m)}, F ${r1(e.db.f*m)}. The first estimate is ${i.k>dk?'higher':'lower'} by ${r0(Math.abs(i.k-dk)/Math.max(1,dk)*100)}%.`}
+      for(const f of e.local||[])t+=`\n  Reference list: ${f.n}, ${f.u}: ${f.k} kcal, P ${f.p}, C ${f.c}, F ${f.f}.`;
+      return t;
+    }).join('\n');
+    const prompt=`You are checking a calorie estimate for a meal before it is saved to a food log.
+${lines}
+${chains.map(c=>`\n${CHAINS[c].name} menu, per serving (name | serving | kcal | protein | carbs | fat, "?" means not published):\n${menuText(c)}`).join('\n')}
+${sh.note?'\nDetails from the person who ate it, which you should trust: '+JSON.stringify(sh.note):''}${fix?'\nTheir correction to an earlier estimate, which you should trust over everything else: '+JSON.stringify(fix):''}
+Rules:
+- Restaurant items with a menu table: find the matching row and use its figures, multiplied by how many were eaten. Where the menu shows "?" for a macro, keep your own split scaled so it fits the menu calories.
+- Restaurant items with no saved menu, or no matching row: if a database row for that restaurant's item is given, use it. Otherwise, if you confidently know the figure that restaurant publishes for the item, use it and mark it "recalled". If not, keep the estimate.
+- Database and reference rows: use them only when they are clearly the same food. If the first estimate differs from the database by more than 20% and nothing visible or stated (added oil, ghee, sauce, a different recipe) explains it, move to the database figure for the estimated weight. Rows for a different food must be ignored.
+- Calories should roughly equal 4 x protein + 4 x carbs + 9 x fat.
+Reply with only a JSON array, same items in the same order, in this shape:
+[{"name":"...","serving":"...","grams":150,"kcal":0,"protein":0,"carbs":0,"fat":0,"chain":null,"basis":"menu","note":"why, in under 12 words"}]
+"basis" is "menu" when a menu table row was used, "database" when a database or reference row confirmed or changed the figure, "recalled" when you used a restaurant's published figure from memory, "estimate" when nothing usable matched. Keep "chain" as given. In notes, call the menu table "the saved menu", never "official".`;
+    let raw;
+    try{raw=await estimate(null,mine.signal,prompt)}
+    catch(e){   // one more try after a short pause; the free models are often briefly overloaded
+      if(ctl!==mine||(e&&e.code==='cancelled'))return items;
+      await new Promise(r=>setTimeout(r,1500));
+      if(ctl!==mine)return items;
+      raw=await estimate(null,mine.signal,prompt);
+    }
+    const out=toItems(raw);
+    if(!out.length)return unchecked();
+    for(const i of out)if(!i.v)i.v='estimate';
+    return out;
+  }catch(e){return unchecked()}
+}
+function badge(i){
+  if(!i.v)return'';
+  const where=i.ck?CHAINS[i.ck].name:i.ch;
+  const lab=i.v==='menu'?'Menu figure'+(where?' · '+where:''):i.v==='database'?'Checked with database'
+    :i.v==='recalled'?'From memory'+(where?' · '+where:''):'Estimate only';
+  return`<div class="sub" style="margin-top:4px"><span class="tag ${i.v==='menu'||i.v==='database'?'ok':''}">${esc(lab)}</span>${esc(i.vn||'')}</div>`;
+}
+function sheetStep(title,text){
+  sheet.innerHTML=`${head(title)}
+    <div class="card"><div class="muted">${esc(text)}</div></div>
+    <button class="btn ghost full" type="button" data-act="close">Stop</button>`;
+}
+function sheetFdc(){
+  sheet.innerHTML=`${head('Food database key')}
+    <div class="small muted">Estimates are checked against the USDA food database. Without your own key the app shares a demo key that allows only a few lookups an hour, so some items may go unchecked. A key is free: sign up at <a href="https://fdc.nal.usda.gov/api-key-signup" target="_blank" rel="noopener">fdc.nal.usda.gov/api-key-signup</a> and it arrives by email. It is stored on this phone only.</div>
+    <div class="field"><label for="d-in">USDA API key</label><input id="d-in" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Paste your key"></div>
+    <button class="btn full" type="button" data-act="saveFdc">Save key</button>`;
+}
 async function analyze(fix){
   const file=sh.file;if(!file)return;
   if(!sampler&&!apiKey){sheetKey();scrim.classList.add('open');return}
@@ -719,10 +918,12 @@ async function analyze(fix){
   sheetWait();scrim.classList.add('open');
   try{
     const out=await estimate(file,mine.signal,prompt);
+    if(ctl!==mine)return;
+    let items=toItems(out);
+    if(!items.length){ctl=null;return sheetPhotoError('No food found in that photo. Try a clearer shot from above.')}
+    items=await verify(items,mine,fix);
     if(ctl!==mine)return;ctl=null;
-    const arr=Array.isArray(out)?out:(out&&Array.isArray(out.items)?out.items:[]);
-    sh.items=arr.map(clean).filter(Boolean).slice(0,15);
-    if(!sh.items.length)return sheetPhotoError('No food found in that photo. Try a clearer shot from above.');
+    sh.items=items;
     sheetReview();
   }catch(e){
     const code=e&&e.code;
@@ -766,6 +967,7 @@ scrim.addEventListener('click',e=>{
   else if(a==='photo')photoInput.click();
   else if(a==='saveKey'){const v=document.getElementById('k-in').value.trim();if(!v)return;apiKey=v;try{localStorage.setItem(KEY_LS,v)}catch(_){}
     render();if(sh.file)sheetContext();else closeSheet()}
+  else if(a==='saveFdc'){const v=document.getElementById('d-in').value.trim();if(!v)return;fdcKey=v;try{localStorage.setItem(FDCKEY_LS,v)}catch(_){}closeSheet();render()}
   else if(a==='runPhoto'){sh.note=document.getElementById('p-note').value.trim().slice(0,300);analyze()}
   else if(a==='fixPhoto'){
     const v=document.getElementById('p-fix').value.trim().slice(0,300);
@@ -806,6 +1008,8 @@ main.addEventListener('click',e=>{
   else if(a==='add')openSheet();
   else if(a==='photo'){if(standalone&&!apiKey){sheetKey();scrim.classList.add('open')}else photoInput.click()}
   else if(a==='setKey'){sheetKey();scrim.classList.add('open')}
+  else if(a==='setFdc'){sheetFdc();scrim.classList.add('open')}
+  else if(a==='dropFdc'){fdcKey='';try{localStorage.removeItem(FDCKEY_LS)}catch(_){}render()}
   else if(a==='export')exportData();
   else if(a==='restore')restoreInput.click();
   else if(a==='dropKey'){apiKey='';gModels=null;try{localStorage.removeItem(KEY_LS);localStorage.removeItem(GM_LS)}catch(_){}render()}
