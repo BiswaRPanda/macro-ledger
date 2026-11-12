@@ -539,7 +539,7 @@ try{apiKey=localStorage.getItem(KEY_LS)||''}catch(e){}
 if(standalone)photoOK=true;
 async function toJpeg(file){
   const bmp=await createImageBitmap(file);
-  const sc=Math.min(1,896/Math.max(bmp.width,bmp.height));
+  const sc=Math.min(1,1024/Math.max(bmp.width,bmp.height));
   const cv=document.createElement('canvas');cv.width=Math.round(bmp.width*sc);cv.height=Math.round(bmp.height*sc);
   cv.getContext('2d').drawImage(bmp,0,0,cv.width,cv.height);
   return cv.toDataURL('image/jpeg',0.8).split(',')[1];
@@ -606,7 +606,7 @@ async function gemini(data,signal,prompt=PROMPT){
     try{res=await call(G+'models/'+m+':generateContent',{method:'POST',signal:t.signal,
       headers:{'content-type':'application/json','x-goog-api-key':apiKey},
       body:JSON.stringify({contents:[{parts:[...(data?[{inline_data:{mime_type:'image/jpeg',data}}]:[]),{text:prompt}]}],
-        generationConfig:{responseMimeType:'application/json'}})})}
+        generationConfig:{responseMimeType:'application/json',temperature:0.2}})})}
     catch(e){
       if(signal&&signal.aborted)throw{code:'cancelled'};
       last=e&&e.code==='cancelled'?'busy':'upstream_error';continue;
@@ -641,11 +641,17 @@ function sheetKey(){
 }
 const photoInput=document.getElementById('photo');
 const PROMPT=`The attached image is a photo of a meal, snack or drink that someone wants to log in a calorie tracker. Dishes may be Indian home or restaurant food.
-Identify each distinct food or drink you can see and estimate the portion actually shown, using plate, bowl and cutlery size as a guide. Include cooking oil, ghee or sauces inside the dish they belong to.
+Work through it in this order before you answer:
+1. Scale. Decide how big the dishware is. Typical sizes: steel thali or dinner plate 26 to 30 cm across, quarter plate 18 cm, katori 150 ml, soup bowl 300 ml, tablespoon 15 ml.
+2. Count. Count every piece of each food: rotis, naans, idlis, pieces of meat or paneer. Flatbreads are rarely served singly: they are stacked or folded over each other, so look for a second edge or layer underneath or beside the top one, and count each one you find. Put the number in "count".
+3. Weigh. Estimate the grams of each food from how much of the plate or bowl it covers and how high it is piled. Typical weights: roti or chapati 40 g each, paratha 80 g, restaurant naan 120 g each, idli 40 g, plain dosa 100 g, masala dosa with filling 200 g. Cooked rice or biryani covering a quarter of a dinner plate is about 200 g, half the plate about 300 g, most of the plate about 400 g. A full katori of dal, curry or sabzi is about 150 g. A chicken or mutton piece on the bone is 80 to 100 g. A paneer cube is about 15 g.
+4. Calories. Curries, biryani, fried and restaurant food carry oil, ghee, butter or cream that cannot be seen; include it inside the dish it belongs to.
+Photos make portions look smaller than they are, and the usual mistake is to estimate too low. When you are unsure between two sizes, choose the larger one.
+Identify each distinct food or drink you can see and estimate the portion actually shown.
 Reply with only a JSON array, one object per food, in this shape:
-[{"name":"Dal tadka","serving":"1 katori, about 150 g","grams":150,"kcal":150,"protein":8,"carbs":18,"fat":5,"lookup":"lentils, cooked","chain":null}]
-"grams" is your estimate of the weight of the portion shown. "lookup" is a plain generic English name for the food, worded the way a nutrition database lists it. "chain" is the name of the restaurant or fast food chain when the item comes from one (packaging, branding, or the person says so), for example "McDonald's" or "KFC", otherwise null.
-Numbers are totals for the portion shown: kcal, then grams of protein, carbs and fat. Keep names short. If the image shows a packaged product with a readable nutrition label, use the label values.
+[{"name":"Roti","count":2,"serving":"2 medium, about 80 g","grams":80,"kcal":240,"protein":7,"carbs":40,"fat":6,"lookup":"bread, chapati or roti","chain":null}]
+"count" is how many pieces there are (1 for a single heap, bowl or glass). "grams" is your estimate of the total weight of the portion shown, all pieces together. "lookup" is a plain generic English name for the food, worded the way a nutrition database lists it. "chain" is the name of the restaurant or fast food chain when the item comes from one (packaging, branding, or the person says so), for example "McDonald's" or "KFC", otherwise null.
+Numbers are totals for the whole portion shown, all pieces together: kcal, then grams of protein, carbs and fat. Keep names short. If the image shows a packaged product with a readable nutrition label, use the label values.
 If there is no food or drink in the image, reply with [].`;
 const ERR={rate_limited:'The service is busy or you have hit today’s usage limit. Try again in a little while.',
   session_expired:'You need to sign in to Claude again, then retry.',
@@ -843,10 +849,11 @@ async function verify(items,mine,fix){
   });
   try{
     sheetStep('Checking the numbers','Comparing the estimate with the food database and restaurant menus.');
+    const budget=new Set(fdcKey?items:[...items].filter(i=>!i.ck&&!localRefs(i.n).length).sort((x,y)=>y.k-x.k).slice(0,3));
     const ev=await Promise.all(items.map(async i=>{
       if(i.ck)return{chain:i.ck};
       const term=i.ch?(i.n.toLowerCase().includes(i.ch.toLowerCase())?i.n:i.ch+' '+i.n):i.lk;
-      const db=i.g&&term?await fdc(term,mine.signal):null;
+      const db=i.g&&term&&budget.has(i)?await fdc(term,mine.signal):null;
       return{db:db||null,local:localRefs(i.n)};
     }));
     if(ctl!==mine)return items;
@@ -868,7 +875,7 @@ ${sh.note?'\nDetails from the person who ate it, which you should trust: '+JSON.
 Rules:
 - Restaurant items with a menu table: find the matching row and use its figures, multiplied by how many were eaten. Where the menu shows "?" for a macro, keep your own split scaled so it fits the menu calories.
 - Restaurant items with no saved menu, or no matching row: if a database row for that restaurant's item is given, use it. Otherwise, if you confidently know the figure that restaurant publishes for the item, use it and mark it "recalled". If not, keep the estimate.
-- Database and reference rows: use them only when they are clearly the same food. If the first estimate differs from the database by more than 20% and nothing visible or stated (added oil, ghee, sauce, a different recipe) explains it, move to the database figure for the estimated weight. Rows for a different food must be ignored.
+- Database and reference rows: use them only when they are clearly the same food prepared the same way. Database rows are mostly plain foods with no cooking fat, so for cooked dishes (curry, sabzi, dal with tadka, pulao, biryani, fried food) a plain-ingredient row is a different food: never lower a cooked dish to a plain-ingredient figure. For plain single foods (plain rice, roti, egg, fruit, milk, bread), if the first estimate differs from the row by more than 20% for the estimated weight, move to the row's figure. Never change the estimated weight or the number of pieces. Rows for a different food must be ignored.
 - Calories should roughly equal 4 x protein + 4 x carbs + 9 x fat.
 Reply with only a JSON array, same items in the same order, in this shape:
 [{"name":"...","serving":"...","grams":150,"kcal":0,"protein":0,"carbs":0,"fat":0,"chain":null,"basis":"menu","note":"why, in under 12 words"}]
@@ -917,9 +924,8 @@ async function analyze(fix){
   const mine=ctl=new AbortController();
   sheetWait();scrim.classList.add('open');
   try{
-    const out=await estimate(file,mine.signal,prompt);
+    let items=toItems(await estimate(file,mine.signal,prompt));
     if(ctl!==mine)return;
-    let items=toItems(out);
     if(!items.length){ctl=null;return sheetPhotoError('No food found in that photo. Try a clearer shot from above.')}
     items=await verify(items,mine,fix);
     if(ctl!==mine)return;ctl=null;
