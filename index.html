@@ -103,6 +103,7 @@ input[type=text],input[type=number],input[type=search],input[type=date],select{w
 .kv{display:flex;justify-content:space-between;gap:12px;align-items:baseline}
 .kv .v{font-family:var(--display);font-weight:700;font-size:20px;white-space:nowrap}
 .pill{display:inline-block;font-size:11px;font-weight:600;letter-spacing:.03em;text-transform:uppercase;padding:3px 8px;border-radius:99px;border:1px solid var(--line);color:var(--muted)}
+a{color:var(--accent)}
 .pill.ok{color:var(--accent);border-color:var(--accent)}
 .pill.bad{color:var(--warn);border-color:var(--warn)}
 .check{display:flex;align-items:center;gap:8px;font-size:14px}
@@ -422,7 +423,7 @@ function renderPlan(){
   </section>
   ${standalone?`<section class="card">
     <div class="secthead"><h2>Photo logging</h2>${apiKey?'<span class="pill ok">Key saved</span>':'<span class="pill">No key yet</span>'}</div>
-    <div class="small muted">Uses your own Anthropic API key, stored on this phone only.</div>
+    <div class="small muted">${apiKey?(isClaudeKey()?'Using your Anthropic key (paid).':'Using your Google Gemini key (free tier).')+' It is stored on this phone only.':'Needs an API key. A Google Gemini key is free and takes a minute to create.'}</div>
     <button class="btn ghost full" type="button" data-act="${apiKey?'dropKey':'setKey'}">${apiKey?'Remove key from this phone':'Add API key'}</button>
   </section>`:''}
   ${standalone?`<section class="card">
@@ -537,28 +538,80 @@ async function toJpeg(file){
   cv.getContext('2d').drawImage(bmp,0,0,cv.width,cv.height);
   return cv.toDataURL('image/jpeg',0.85).split(',')[1];
 }
-async function direct(file,signal){
-  let data;try{data=await toJpeg(file)}catch(e){throw{code:'image_rejected'}}
-  let res;
-  try{res=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',signal,
-    headers:{'content-type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-    body:JSON.stringify({model:'claude-sonnet-5-5',max_tokens:1500,messages:[{role:'user',content:[
-      {type:'image',source:{type:'base64',media_type:'image/jpeg',data}},{type:'text',text:PROMPT}]}]})})}
-  catch(e){throw{code:e&&e.name==='AbortError'?'cancelled':'upstream_error'}}
-  if(res.status===401||res.status===403)throw{code:'bad_key'};
-  if(res.status===429)throw{code:'rate_limited'};
-  if(!res.ok)throw{code:'upstream_error'};
-  const j=await res.json();
-  const text=(j.content||[]).filter(b=>b.type==='text').map(b=>b.text).join('');
+/* Two ways to read a photo with the owner's own key: Google Gemini (has a free tier) or Anthropic (paid).
+   The key's shape says which one it is. */
+const isClaudeKey=()=>apiKey.startsWith('sk-ant');
+async function call(url,opt){
+  try{return await fetch(url,opt)}catch(e){throw{code:e&&e.name==='AbortError'?'cancelled':'upstream_error'}}
+}
+function parseArr(text){
   const a=text.indexOf('['),b=text.lastIndexOf(']');
   if(a<0||b<a)throw{code:'invalid_json'};
   try{return JSON.parse(text.slice(a,b+1))}catch(e){throw{code:'invalid_json'}}
 }
+async function claude(data,signal){
+  const res=await call('https://api.anthropic.com/v1/messages',{method:'POST',signal,
+    headers:{'content-type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+    body:JSON.stringify({model:'claude-sonnet-5-5',max_tokens:1500,messages:[{role:'user',content:[
+      {type:'image',source:{type:'base64',media_type:'image/jpeg',data}},{type:'text',text:PROMPT}]}]})});
+  if(res.status===401||res.status===403)throw{code:'bad_key'};
+  if(res.status===429)throw{code:'rate_limited'};
+  if(!res.ok)throw{code:'upstream_error'};
+  const j=await res.json();
+  return parseArr((j.content||[]).filter(b=>b.type==='text').map(b=>b.text).join(''));
+}
+const G='https://generativelanguage.googleapis.com/v1beta/';
+let gModels=null,gFor='';
+/* Model names change over time, so ask the API which Flash models this key can use: newest full Flash first, Lite ones as fallbacks. */
+async function geminiModels(signal){
+  if(gModels&&gFor===apiKey)return gModels;
+  const res=await call(G+'models?pageSize=200',{signal,headers:{'x-goog-api-key':apiKey}});
+  if(res.status===400||res.status===401||res.status===403)throw{code:'bad_key'};
+  if(!res.ok)throw{code:res.status===429?'rate_limited':'upstream_error'};
+  const j=await res.json();
+  const rank=n=>{
+    if(n==='gemini-flash-latest')return 1e6;
+    if(n==='gemini-flash-lite-latest')return 999;
+    const m=/^gemini-(\d+(?:\.\d+)?)-flash(-lite)?$/.exec(n);
+    return m?+m[1]*(m[2]?1:1000):null;
+  };
+  const names=(j.models||[]).filter(m=>(m.supportedGenerationMethods||[]).includes('generateContent'))
+    .map(m=>String(m.name||'').replace(/^models\//,'')).filter(n=>rank(n)!==null).sort((x,y)=>rank(y)-rank(x));
+  gModels=names.length?names:['gemini-flash-latest'];gFor=apiKey;
+  return gModels;
+}
+async function gemini(data,signal){
+  const models=(await geminiModels(signal)).slice(0,4);
+  let last='upstream_error';
+  for(const m of models){
+    const res=await call(G+'models/'+m+':generateContent',{method:'POST',signal,
+      headers:{'content-type':'application/json','x-goog-api-key':apiKey},
+      body:JSON.stringify({contents:[{parts:[{inline_data:{mime_type:'image/jpeg',data}},{text:PROMPT}]}],
+        generationConfig:{responseMimeType:'application/json'}})});
+    if(res.status===401||res.status===403)throw{code:'bad_key'};
+    if(!res.ok){last=res.status===429?'rate_limited':'upstream_error';continue}   // no free quota or gone: try the next model
+    const j=await res.json();
+    const c=j.candidates&&j.candidates[0];
+    const text=((c&&c.content&&c.content.parts)||[]).map(x=>x.text||'').join('');
+    if(!text)throw{code:c?'empty_completion':'refused'};
+    gModels=[m,...gModels.filter(x=>x!==m)];
+    return parseArr(text);
+  }
+  throw{code:last};
+}
+async function direct(file,signal){
+  let data;try{data=await toJpeg(file)}catch(e){throw{code:'image_rejected'}}
+  return isClaudeKey()?claude(data,signal):gemini(data,signal);
+}
 const estimate=(file,signal)=>sampler?sampler.json(PROMPT,{images:[file],signal}):direct(file,signal);
 function sheetKey(){
   sheet.innerHTML=`${head('Set up photo logging')}
-    <div class="small muted">Photo logging sends your picture to Claude using your own Anthropic API key. Create one at console.anthropic.com, then paste it here. It is stored on this phone only, and each photo is billed to your API account.</div>
-    <div class="field"><label for="k-in">Anthropic API key</label><input id="k-in" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="sk-ant-..."></div>
+    <div class="small muted">Photo logging sends your picture to an AI model using your own API key. The key is stored on this phone only.</div>
+    <div class="card">
+      <div><b>Free: Google Gemini.</b> <span class="muted small">Sign in with a Google account at <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a>, choose Create API key, and paste it below. No card needed. There is a daily limit, and on the free tier Google may use what you send to improve its products.</span></div>
+      <div><b>Paid: Anthropic Claude.</b> <span class="muted small">A key from console.anthropic.com also works. Each photo is billed to that account.</span></div>
+    </div>
+    <div class="field"><label for="k-in">API key</label><input id="k-in" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Paste your key"></div>
     <button class="btn full" type="button" data-act="saveKey">Save key</button>
     <button class="btn ghost full" type="button" data-act="back">Add by hand instead</button>`;
 }
@@ -569,7 +622,7 @@ Reply with only a JSON array, one object per food, in this shape:
 [{"name":"Dal tadka","serving":"1 katori, about 150 g","kcal":150,"protein":8,"carbs":18,"fat":5}]
 Numbers are totals for the portion shown: kcal, then grams of protein, carbs and fat. Keep names short. If the image shows a packaged product with a readable nutrition label, use the label values.
 If there is no food or drink in the image, reply with [].`;
-const ERR={rate_limited:'Claude is busy or you have hit a usage limit. Try again in a little while.',
+const ERR={rate_limited:'The service is busy or you have hit today’s usage limit. Try again in a little while.',
   session_expired:'You need to sign in to Claude again, then retry.',
   image_rejected:'That file could not be read. Try a JPEG or PNG photo.',
   refused:'Claude could not work with that photo. Try a different one.',
@@ -590,7 +643,7 @@ async function connectPhoto(){
 const head=t=>`<div class="top"><h1>${t}</h1><button class="icon" type="button" data-act="close" aria-label="Close">×</button></div>`;
 function sheetWait(){
   sheet.innerHTML=`${head('Reading your photo')}
-    <div class="card"><div class="muted">Claude is working out what is on the plate and how much. This usually takes 10 to 40 seconds.</div></div>
+    <div class="card"><div class="muted">Working out what is on the plate and how much. This usually takes 10 to 40 seconds.</div></div>
     <button class="btn ghost full" type="button" data-act="close">Stop</button>`;
 }
 function sheetPhotoError(msg){
@@ -634,7 +687,7 @@ async function analyze(file){
     if(code==='cancelled'||ctl!==mine)return;
     ctl=null;
     if(HIDE.includes(code)){photoOK=false;render();return sheetPhotoError('Photo logging is not available here because Claude was not allowed to read images for this page.')}
-    sheetPhotoError(ERR[code]||'Something went wrong reaching Claude. Check your connection and try again.');
+    sheetPhotoError(ERR[code]||'Something went wrong reaching the photo service. Check your connection and try again.');
   }
 }
 photoInput.addEventListener('change',()=>{const f=photoInput.files&&photoInput.files[0];photoInput.value='';if(f)analyze(f)});

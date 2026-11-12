@@ -15,5 +15,5 @@ Open the GitHub Pages link, then choose **Add to Home Screen** from the browser 
 - Works offline after the first visit. Photo logging still needs a connection.
 - Everything is stored in the browser on that phone. Clearing site data erases it, and it does not sync between devices. Use **Plan → Backup** to save a backup file and to restore it on another phone.
 - Weigh-ins can be added or corrected for earlier days, and saved foods can be removed from **Add food → My foods**.
-- Photo logging calls the Anthropic API with your own key, which you enter in the Plan tab. The key is stored on the phone only and is never part of this repository.
+- Photo logging uses your own API key, which you enter in the Plan tab: a free Google Gemini key from aistudio.google.com/apikey, or a paid Anthropic key. The key is stored on the phone only and is never part of this repository.
 - Food values and photo estimates are approximate. Targets are estimates, not medical advice.
