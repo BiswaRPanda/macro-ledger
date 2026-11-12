@@ -533,10 +533,10 @@ try{apiKey=localStorage.getItem(KEY_LS)||''}catch(e){}
 if(standalone)photoOK=true;
 async function toJpeg(file){
   const bmp=await createImageBitmap(file);
-  const sc=Math.min(1,1280/Math.max(bmp.width,bmp.height));
+  const sc=Math.min(1,896/Math.max(bmp.width,bmp.height));
   const cv=document.createElement('canvas');cv.width=Math.round(bmp.width*sc);cv.height=Math.round(bmp.height*sc);
   cv.getContext('2d').drawImage(bmp,0,0,cv.width,cv.height);
-  return cv.toDataURL('image/jpeg',0.85).split(',')[1];
+  return cv.toDataURL('image/jpeg',0.8).split(',')[1];
 }
 /* Two ways to read a photo with the owner's own key: Google Gemini (has a free tier) or Anthropic (paid).
    The key's shape says which one it is. */
@@ -563,8 +563,12 @@ async function claude(data,signal){
 const G='https://generativelanguage.googleapis.com/v1beta/';
 let gModels=null,gFor='';
 /* Model names change over time, so ask the API which Flash models this key can use: newest full Flash first, Lite ones as fallbacks. */
+const GM_LS='macroledger.gmodels';
+const saveModels=()=>{try{localStorage.setItem(GM_LS,JSON.stringify({at:Date.now(),list:gModels}))}catch(e){}};
 async function geminiModels(signal){
   if(gModels&&gFor===apiKey)return gModels;
+  try{const c=JSON.parse(localStorage.getItem(GM_LS)||'null');
+    if(c&&Array.isArray(c.list)&&c.list.length&&Date.now()-c.at<7*864e5){gModels=c.list;gFor=apiKey;return gModels}}catch(e){}
   const res=await call(G+'models?pageSize=200',{signal,headers:{'x-goog-api-key':apiKey}});
   if(res.status===400||res.status===401||res.status===403)throw{code:'bad_key'};
   if(!res.ok)throw{code:res.status===429?'rate_limited':'upstream_error'};
@@ -577,20 +581,21 @@ async function geminiModels(signal){
   };
   const names=(j.models||[]).filter(m=>(m.supportedGenerationMethods||[]).includes('generateContent'))
     .map(m=>String(m.name||'').replace(/^models\//,'')).filter(n=>rank(n)!==null).sort((x,y)=>rank(y)-rank(x));
-  // Full Flash models are often overloaded on the free tier, so Lite ones come early in the queue, not last.
+  // Lite models answer in a few seconds; full Flash is often overloaded on the free tier, so it is only the fallback.
   const full=names.filter(n=>rank(n)>=1000),lite=names.filter(n=>rank(n)<1000);
-  const order=[full[0],full[1],lite[0],lite[1],full[2]].filter(Boolean);
-  gModels=order.length?order:['gemini-flash-latest','gemini-flash-lite-latest'];gFor=apiKey;
+  const order=[lite[0],lite[1],full[0],full[1]].filter(Boolean);
+  gModels=order.length?order:['gemini-flash-lite-latest','gemini-flash-latest'];gFor=apiKey;
+  saveModels();
   return gModels;
 }
 async function gemini(data,signal){
   const models=await geminiModels(signal);
   let last='upstream_error';
   for(const m of models){
-    // Give each model 30 seconds, then move on to the next one.
+    // Give each model 12 seconds, then move on to the next one.
     const t=new AbortController(),stop=()=>t.abort();
     if(signal){if(signal.aborted)throw{code:'cancelled'};signal.addEventListener('abort',stop)}
-    const timer=setTimeout(stop,30000);
+    const timer=setTimeout(stop,12000);
     let res;
     try{res=await call(G+'models/'+m+':generateContent',{method:'POST',signal:t.signal,
       headers:{'content-type':'application/json','x-goog-api-key':apiKey},
@@ -607,7 +612,7 @@ async function gemini(data,signal){
     const c=j.candidates&&j.candidates[0];
     const text=((c&&c.content&&c.content.parts)||[]).map(x=>x.text||'').join('');
     if(!text)throw{code:c?'empty_completion':'refused'};
-    gModels=[m,...gModels.filter(x=>x!==m)];
+    gModels=[m,...gModels.filter(x=>x!==m)];saveModels();
     return parseArr(text);
   }
   throw{code:last};
@@ -657,7 +662,7 @@ async function connectPhoto(){
 const head=t=>`<div class="top"><h1>${t}</h1><button class="icon" type="button" data-act="close" aria-label="Close">×</button></div>`;
 function sheetWait(){
   sheet.innerHTML=`${head('Reading your photo')}
-    <div class="card"><div class="muted">Working out what is on the plate and how much. This usually takes 10 to 40 seconds, longer when the service is busy.</div></div>
+    <div class="card"><div class="muted">Working out what is on the plate and how much. This usually takes a few seconds, longer when the service is busy.</div></div>
     <button class="btn ghost full" type="button" data-act="close">Stop</button>`;
 }
 function sheetPhotoError(msg){
@@ -772,7 +777,7 @@ main.addEventListener('click',e=>{
   else if(a==='setKey'){sheetKey();scrim.classList.add('open')}
   else if(a==='export')exportData();
   else if(a==='restore')restoreInput.click();
-  else if(a==='dropKey'){apiKey='';try{localStorage.removeItem(KEY_LS)}catch(_){}render()}
+  else if(a==='dropKey'){apiKey='';gModels=null;try{localStorage.removeItem(KEY_LS);localStorage.removeItem(GM_LS)}catch(_){}render()}
   else if(a==='del'){const k=ymOf(view.date);month(k).days[ddOf(view.date)].splice(+b.dataset.i,1);touch(k);render()}
   else if(a==='saveW'){
     const w=num('w-in'),d=document.getElementById('w-date').value,err=document.getElementById('w-err');
