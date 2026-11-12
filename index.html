@@ -104,6 +104,8 @@ input[type=text],input[type=number],input[type=search],input[type=date],select{w
 .kv .v{font-family:var(--display);font-weight:700;font-size:20px;white-space:nowrap}
 .pill{display:inline-block;font-size:11px;font-weight:600;letter-spacing:.03em;text-transform:uppercase;padding:3px 8px;border-radius:99px;border:1px solid var(--line);color:var(--muted)}
 a{color:var(--accent)}
+textarea{width:100%;min-height:76px;padding:10px 12px;border:0;background:var(--field);border-radius:14px;font:inherit;font-size:16px;color:inherit;resize:none;display:block}
+.shot{width:100%;max-height:170px;object-fit:cover;border-radius:16px;display:block}
 .pill.ok{color:var(--accent);border-color:var(--accent)}
 .pill.bad{color:var(--warn);border-color:var(--warn)}
 .check{display:flex;align-items:center;gap:8px;font-size:14px}
@@ -549,11 +551,11 @@ function parseArr(text){
   if(a<0||b<a)throw{code:'invalid_json'};
   try{return JSON.parse(text.slice(a,b+1))}catch(e){throw{code:'invalid_json'}}
 }
-async function claude(data,signal){
+async function claude(data,signal,prompt=PROMPT){
   const res=await call('https://api.anthropic.com/v1/messages',{method:'POST',signal,
     headers:{'content-type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
     body:JSON.stringify({model:'claude-sonnet-5-5',max_tokens:1500,messages:[{role:'user',content:[
-      {type:'image',source:{type:'base64',media_type:'image/jpeg',data}},{type:'text',text:PROMPT}]}]})});
+      {type:'image',source:{type:'base64',media_type:'image/jpeg',data}},{type:'text',text:prompt}]}]})});
   if(res.status===401||res.status===403)throw{code:'bad_key'};
   if(res.status===429)throw{code:'rate_limited'};
   if(!res.ok)throw{code:'upstream_error'};
@@ -588,7 +590,7 @@ async function geminiModels(signal){
   saveModels();
   return gModels;
 }
-async function gemini(data,signal){
+async function gemini(data,signal,prompt=PROMPT){
   const models=await geminiModels(signal);
   let last='upstream_error';
   for(const m of models){
@@ -599,7 +601,7 @@ async function gemini(data,signal){
     let res;
     try{res=await call(G+'models/'+m+':generateContent',{method:'POST',signal:t.signal,
       headers:{'content-type':'application/json','x-goog-api-key':apiKey},
-      body:JSON.stringify({contents:[{parts:[{inline_data:{mime_type:'image/jpeg',data}},{text:PROMPT}]}],
+      body:JSON.stringify({contents:[{parts:[{inline_data:{mime_type:'image/jpeg',data}},{text:prompt}]}],
         generationConfig:{responseMimeType:'application/json'}})})}
     catch(e){
       if(signal&&signal.aborted)throw{code:'cancelled'};
@@ -617,11 +619,11 @@ async function gemini(data,signal){
   }
   throw{code:last};
 }
-async function direct(file,signal){
+async function direct(file,signal,prompt){
   let data;try{data=await toJpeg(file)}catch(e){throw{code:'image_rejected'}}
-  return isClaudeKey()?claude(data,signal):gemini(data,signal);
+  return isClaudeKey()?claude(data,signal,prompt):gemini(data,signal,prompt);
 }
-const estimate=(file,signal)=>sampler?sampler.json(PROMPT,{images:[file],signal}):direct(file,signal);
+const estimate=(file,signal,prompt)=>sampler?sampler.json(prompt,{images:[file],signal}):direct(file,signal,prompt);
 function sheetKey(){
   sheet.innerHTML=`${head('Set up photo logging')}
     <div class="small muted">Photo logging sends your picture to an AI model using your own API key. The key is stored on this phone only.</div>
@@ -660,6 +662,16 @@ async function connectPhoto(){
   }catch(e){}
 }
 const head=t=>`<div class="top"><h1>${t}</h1><button class="icon" type="button" data-act="close" aria-label="Close">×</button></div>`;
+function sheetContext(){
+  if(sh.url)URL.revokeObjectURL(sh.url);
+  try{sh.url=URL.createObjectURL(sh.file)}catch(e){sh.url=''}
+  sheet.innerHTML=`${head('Add details')}
+    ${sh.url?`<img class="shot" src="${sh.url}" alt="Your photo">`:''}
+    <div class="field"><label for="p-note">Anything the photo does not show? Optional.</label>
+      <textarea id="p-note" maxlength="300" placeholder="For example: 2 rotis, dal made with 1 tsp ghee, about 150 g rice">${esc(sh.note||'')}</textarea></div>
+    <div class="small muted">Amounts, ingredients and how it was cooked give a better estimate.</div>
+    <button class="btn full" type="button" data-act="runPhoto">Estimate</button>`;
+}
 function sheetWait(){
   sheet.innerHTML=`${head('Reading your photo')}
     <div class="card"><div class="muted">Working out what is on the plate and how much. This usually takes a few seconds, longer when the service is busy.</div></div>
@@ -680,7 +692,11 @@ function sheetReview(){
       <button class="x" type="button" data-act="dropItem" data-i="${x}" aria-label="Remove ${esc(i.n)}">×</button></div>`).join('')}</div>
     <div class="card"><div class="kv"><span class="muted small">Total</span><span class="v num">${r0(t.k)} kcal</span></div>
       <div class="kv"><span class="muted small">Protein · Carbs · Fat</span><span class="v num">${r0(t.p)} · ${r0(t.c)} · ${r0(t.f)} g</span></div></div>
-    <button class="btn full" type="button" data-act="commitPhoto">Log ${it.length} ${it.length===1?'item':'items'} to ${nice(view.date).toLowerCase()}</button>`;
+    <button class="btn full" type="button" data-act="commitPhoto">Log ${it.length} ${it.length===1?'item':'items'} to ${nice(view.date).toLowerCase()}</button>
+    <div class="field"><label for="p-fix">Something off? Say what to change.</label>
+      <textarea id="p-fix" maxlength="300" placeholder="For example: that is paneer not tofu, and there were 3 rotis"></textarea></div>
+    <div class="small" id="p-fixerr" style="color:var(--warn)" role="alert"></div>
+    <button class="btn ghost full" type="button" data-act="fixPhoto">Fix this</button>`;
 }
 function clean(o){
   if(!o||typeof o!=='object')return null;
@@ -690,12 +706,19 @@ function clean(o){
   if(!k)return null;
   return{n,u:String(o.serving||'as pictured').trim().slice(0,40),k:r1(k),p:r1(p),c:r1(c),f:r1(f)};
 }
-async function analyze(file){
+async function analyze(fix){
+  const file=sh.file;if(!file)return;
   if(!sampler&&!apiKey){sheetKey();scrim.classList.add('open');return}
+  let prompt=PROMPT;
+  if(sh.note)prompt+='\nThe person logging this meal added these details. Trust them over what the photo suggests: '+JSON.stringify(sh.note);
+  if(fix&&sh.items)prompt+='\nYour earlier estimate for this photo was: '
+    +JSON.stringify(sh.items.map(i=>({name:i.n,serving:i.u,kcal:i.k,protein:i.p,carbs:i.c,fat:i.f})))
+    +'\nThe person says it needs correcting: '+JSON.stringify(fix)
+    +'\nReply with the full corrected JSON array. Apply the correction, recalculate the numbers it affects, and leave items they did not mention unchanged.';
   const mine=ctl=new AbortController();
   sheetWait();scrim.classList.add('open');
   try{
-    const out=await estimate(file,mine.signal);
+    const out=await estimate(file,mine.signal,prompt);
     if(ctl!==mine)return;ctl=null;
     const arr=Array.isArray(out)?out:(out&&Array.isArray(out.items)?out.items:[]);
     sh.items=arr.map(clean).filter(Boolean).slice(0,15);
@@ -709,7 +732,8 @@ async function analyze(file){
     sheetPhotoError(ERR[code]||'Something went wrong reaching the photo service. Check your connection and try again.');
   }
 }
-photoInput.addEventListener('change',()=>{const f=photoInput.files&&photoInput.files[0];photoInput.value='';if(f)analyze(f)});
+photoInput.addEventListener('change',()=>{const f=photoInput.files&&photoInput.files[0];photoInput.value='';if(!f)return;
+  sh={file:f,note:''};sheetContext();scrim.classList.add('open')});
 
 function logItem(f,q,skipRecent){
   const k=ymOf(view.date),m=month(k),dd=ddOf(view.date);
@@ -740,7 +764,14 @@ scrim.addEventListener('click',e=>{
   }
   else if(a==='doRestore'){applyBackup(sh.backup);sh.backup=null;closeSheet();render()}
   else if(a==='photo')photoInput.click();
-  else if(a==='saveKey'){const v=document.getElementById('k-in').value.trim();if(!v)return;apiKey=v;try{localStorage.setItem(KEY_LS,v)}catch(_){}closeSheet();render()}
+  else if(a==='saveKey'){const v=document.getElementById('k-in').value.trim();if(!v)return;apiKey=v;try{localStorage.setItem(KEY_LS,v)}catch(_){}
+    render();if(sh.file)sheetContext();else closeSheet()}
+  else if(a==='runPhoto'){sh.note=document.getElementById('p-note').value.trim().slice(0,300);analyze()}
+  else if(a==='fixPhoto'){
+    const v=document.getElementById('p-fix').value.trim().slice(0,300);
+    if(!v){document.getElementById('p-fixerr').textContent='Write what should change first.';return}
+    analyze(v);
+  }
   else if(a==='dropItem'){sh.items.splice(+b.dataset.i,1);if(sh.items.length)sheetReview();else closeSheet()}
   else if(a==='commitPhoto'){for(const i of sh.items)logItem(i,1,true);closeSheet();render()}
   else if(a==='commitCustom'){
